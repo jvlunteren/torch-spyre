@@ -1101,7 +1101,7 @@ class TestWorkDivisionContextAnswers(unittest.TestCase):
 
 
 class TestMatmulRowOrderSplitDomains(unittest.TestCase):
-    def test_flattened_staggered_rows_keep_producer_order(self):
+    def test_flattened_staggered_rows_allow_backend_reordering(self):
         from torch_spyre._inductor.constants import BATCH_MATMUL_OP
 
         rows, n, k = (_isym(name) for name in ("rows", "n", "k"))
@@ -1127,7 +1127,7 @@ class TestMatmulRowOrderSplitDomains(unittest.TestCase):
         )
         self.assertEqual(
             aligned_ownership_split_domains(ctx).allowed_splits[rows],
-            frozenset({2, 4, 8}),
+            frozenset({1, 2, 4, 8}),
         )
         # Matching physical row order must not ban a one-core matmul.
         ctx.output_td = TensorDep(
@@ -1139,7 +1139,7 @@ class TestMatmulRowOrderSplitDomains(unittest.TestCase):
             frozenset({1, 2, 4, 8}),
         )
         ctx.output_td = output
-        # A non-matmul with the same accesses is outside this guard.
+        # Non-matmuls retain the same contiguous-ownership split domain.
         ctx.op = _computed_buffer((8, 64))
         self.assertEqual(
             aligned_ownership_split_domains(ctx).allowed_splits[rows],
@@ -2571,7 +2571,7 @@ class TestResidencyEdgeMatching(unittest.TestCase):
             )
             solver = allocator.layout_planning(built, allocator.size)
             solved = {b.name: b for b in solver.plan_layout()}
-            # _commit_divisions would record the committed ownership here.
+            # commit_divisions would record the committed ownership here.
             for op in graph.operations:
                 op.iteration_space_ownership = object()
             allocator._push_allocation(graph, list(solved.values()), [])
@@ -3057,7 +3057,7 @@ class TestCoOptimizingAllocator(unittest.TestCase):
             ),
             self.assertRaisesRegex(Unsupported, "chosen split violates hard domain"),
         ):
-            allocator._commit_divisions(graph, allocation)
+            allocator_module.commit_divisions(graph, allocation)
 
     def test_no_enumerable_candidates_keeps_legal_fixed_division(self):
         op = MagicMock(spec=ComputedBuffer)
