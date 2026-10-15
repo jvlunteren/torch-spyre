@@ -63,7 +63,7 @@ std::string correctionKey(const std::vector<at::Tensor>& tensors) {
 
 }  // namespace
 
-std::shared_ptr<HostBuffer> CorrectionCache::find(const std::string& key) {
+CorrectionCache::Blob CorrectionCache::find(const std::string& key) {
   std::lock_guard<std::mutex> lock(mu_);
   auto it = index_.find(key);
   if (it == index_.end()) return nullptr;
@@ -71,8 +71,7 @@ std::shared_ptr<HostBuffer> CorrectionCache::find(const std::string& key) {
   return it->second->second;
 }
 
-void CorrectionCache::insert(const std::string& key,
-                             std::shared_ptr<HostBuffer> blob) {
+void CorrectionCache::insert(const std::string& key, Blob blob) {
   const uint64_t max_entries =
       envUint("TORCH_SPYRE_CORRECTION_CACHE_ENTRIES", 1024);
   const uint64_t max_bytes =
@@ -184,11 +183,14 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
       tensor_allocs.push_back(get_composite_address(tensor));
     }
   }
-  auto* params = flex::createComputeParams(
-      &program_address_, std::move(tensor_allocs), name_, bootstrap_offset_);
+  std::unique_ptr<flex::ComputeParams, decltype(&flex::destroyComputeParams)>
+      params(
+          flex::createComputeParams(&program_address_, std::move(tensor_allocs),
+                                    name_, bootstrap_offset_),
+          flex::destroyComputeParams);
+  params->program_corrections = std::move(ctx.program_corrections);
   params->pipeline_barrier = pipeline_barrier_;
-  stream.launchCompute(params);
-  flex::destroyComputeParams(params);
+  stream.launchCompute(params.get());
 }
 
 void JobPlanStepCompute::write(std::ostream& os) const {
@@ -236,13 +238,13 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
   const bool verify =
       cacheable && envEnabled("TORCH_SPYRE_CORRECTION_CACHE_VERIFY");
   std::string key;
-  std::shared_ptr<HostBuffer> cached;
+  CorrectionCache::Blob cached;
   if (cacheable) {
     key = correctionKey(ctx.inputs_outputs);
     cached = correction_cache_.find(key);
     if (cached && !verify) {
       ++g_cache_hits;
-      launchCorrection(cached->data(), cached->size(), cached, stream);
+      launchCorrection(ctx, std::move(cached), stream);
       return;
     }
   }
@@ -273,8 +275,13 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
     }
   } guard{params};
 
-  // Create a managed shared_ptr to ensure the host buffer's lifetime is tied to
-  // callback destruction.
+  // Flex RuntimeStream::launchOperation(const HostComputeParams*) resolves
+  // arguments and calls deeptools::processComputeOnHostCommand[Fast] inline
+  // before returning this fully written buffer (Flex #1990,
+  // src/runtime_stream/runtime_stream.cpp). This is not queued work on S_prep:
+  // caller ordering makes the bytes ready before S_dev receives the consuming
+  // ComputeParams, regardless of whether hazard tracking is enabled.
+  // Shared ownership then keeps the bytes alive through upload completion.
   std::shared_ptr<flex::HostComputeBuffer> host_buffer(
       stream.launchHostCompute(params), flex::destroyHostComputeBuffer);
 
@@ -291,23 +298,33 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
                 host_buffer->size(), " bytes");
   } else if (cacheable) {
     ++g_cache_misses;
-    auto blob = std::make_shared<HostBuffer>(host_buffer->size());
-    std::memcpy(blob->data(), host_buffer->data(), host_buffer->size());
-    correction_cache_.insert(key, std::move(blob));
+    // The buffer is not written after launchHostCompute returns, so later
+    // launches can share it.
+    correction_cache_.insert(key, host_buffer);
   }
 
-  launchCorrection(host_buffer->data(), host_buffer->size(), host_buffer,
-                   stream);
+  launchCorrection(ctx, std::move(host_buffer), stream);
 }
 
-void JobPlanStepHostCompute::launchCorrection(void* data, size_t size,
-                                              std::shared_ptr<void> keep_alive,
-                                              const SpyreStream& stream) const {
+void JobPlanStepHostCompute::launchCorrection(
+    LaunchContext& ctx, std::shared_ptr<flex::HostComputeBuffer> correction,
+    const SpyreStream& stream) const {
+  if (ctx.batch_program_corrections) {
+    ctx.program_corrections.push_back(
+        {std::move(correction), std::make_shared<flex::CompositeAddress>(
+                                    device_address_.clone_non_owning())});
+    return;
+  }
+
+  // Create DmaParams to transfer the host buffer.
   auto* dma_params =
-      flex::createDmaParams(data, size, /*to_device=*/true, &device_address_);
+      flex::createDmaParams(correction->data(), correction->size(),
+                            /*to_device=*/true, &device_address_);
   dma_params->pipeline_barrier = pipeline_barrier_;
-  // The callback holds the buffer until the DMA completes or is cancelled.
-  dma_params->callback = [keep_alive](void*) {};
+  // The managed buffer is freed when the callback is destroyed, which happens
+  // after the DMA completes or is cancelled.
+  dma_params->callback = [correction](void*) {};
+
   try {
     stream.launchH2D(dma_params);
   }
@@ -316,6 +333,9 @@ void JobPlanStepHostCompute::launchCorrection(void* data, size_t size,
     throw;
   }
   flex::destroyDmaParams(dma_params);
+
+  // correction goes out of scope here, leaving the callback (and the cache, on
+  // a cacheable step) with the remaining references to the host buffer.
 }
 
 void JobPlanStepHostCompute::write(std::ostream& os) const {

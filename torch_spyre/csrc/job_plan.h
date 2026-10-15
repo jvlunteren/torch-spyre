@@ -262,11 +262,13 @@ struct SymbolicArg {
  */
 class CorrectionCache {
  public:
-  std::shared_ptr<HostBuffer> find(const std::string& key);
-  void insert(const std::string& key, std::shared_ptr<HostBuffer> blob);
+  using Blob = std::shared_ptr<flex::HostComputeBuffer>;
+
+  Blob find(const std::string& key);
+  void insert(const std::string& key, Blob blob);
 
  private:
-  using Entry = std::pair<std::string, std::shared_ptr<HostBuffer>>;
+  using Entry = std::pair<std::string, Blob>;
   std::mutex mu_;
   std::list<Entry> lru_;
   std::unordered_map<std::string, std::list<Entry>::iterator> index_;
@@ -302,6 +304,8 @@ struct LaunchContext {
    * for existing callers that pass no payload.
    */
   std::vector<SymbolicArg> symbolic_args;
+  bool batch_program_corrections = false;
+  std::vector<flex::ProgramCorrection> program_corrections;
 };
 
 /**
@@ -593,8 +597,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
       const std::vector<SymbolicArg>& symbolic_args);
 
  private:
-  void launchCorrection(void* data, size_t size,
-                        std::shared_ptr<void> keep_alive,
+  void launchCorrection(LaunchContext& ctx,
+                        std::shared_ptr<flex::HostComputeBuffer> correction,
                         const SpyreStream& stream) const;
 
   mutable CorrectionCache correction_cache_;
