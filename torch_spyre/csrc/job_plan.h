@@ -250,12 +250,6 @@ struct SymbolicArg {
 };
 
 /**
- * @brief Context passed to JobPlanStep::construct() at launch time
- *
- * Carries runtime data available at LaunchKernel time that was not available
- * during PrepareKernel.
- */
-/**
  * @brief Bounded LRU of program correction blobs for one HostCompute step.
  *
  * Enabled by TORCH_SPYRE_CORRECTION_CACHE=1, see JobPlanStepHostCompute.
@@ -284,6 +278,12 @@ struct CorrectionCacheStats {
 
 CorrectionCacheStats getCorrectionCacheStats();
 
+/**
+ * @brief Context passed to JobPlanStep::construct() at launch time
+ *
+ * Carries runtime data available at LaunchKernel time that was not available
+ * during PrepareKernel.
+ */
 struct LaunchContext {
   /**
    * @brief at::Tensor list of inputs and outputs

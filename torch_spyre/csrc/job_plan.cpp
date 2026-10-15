@@ -334,8 +334,9 @@ void JobPlanStepHostCompute::launchCorrection(
   }
   flex::destroyDmaParams(dma_params);
 
-  // correction goes out of scope here, leaving the callback (and the cache, on
-  // a cacheable step) with the remaining references to the host buffer.
+  // managed goes out of scope here, leaving the callback with the only
+  // remaining reference to the host buffer. The buffer will be freed when the
+  // callback is destroyed.
 }
 
 void JobPlanStepHostCompute::write(std::ostream& os) const {
