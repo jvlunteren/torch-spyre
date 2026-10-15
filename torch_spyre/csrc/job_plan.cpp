@@ -73,7 +73,7 @@ CorrectionCache::Blob CorrectionCache::find(const std::string& key) {
 
 void CorrectionCache::insert(const std::string& key, Blob blob) {
   const uint64_t max_entries =
-      envUint("TORCH_SPYRE_CORRECTION_CACHE_ENTRIES", 1024);
+      envUint("TORCH_SPYRE_CORRECTION_CACHE_ENTRIES", 8192);
   const uint64_t max_bytes =
       envUint("TORCH_SPYRE_CORRECTION_CACHE_BYTES", uint64_t{4} << 30);
   std::lock_guard<std::mutex> lock(mu_);
